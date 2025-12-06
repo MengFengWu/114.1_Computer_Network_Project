@@ -190,9 +190,7 @@ void chat_mode() {
     std::cout << "---Entered Chat Room (Type \"_exit\" to quit)---\n";
     clientState = CHATTING;
 
-    std::cout << "...\n";
     print_chat_history(chatHistory[peerName]);
-    std::cout << "...\n";
 
     fd_set read_fds;
     char buf[4096];
@@ -240,9 +238,10 @@ void group_mode(int serverSocket, const std::string &groupName) {
     std::cout << "---Entered Group Room (Type \"_exit\" to quit)---\n";
     clientState = GROUPING;
 
-    std::cout << "...\n";
     print_chat_history(groups[groupName].groupHistory);
-    std::cout << "...\n";
+
+    std::cout << "\33[2K\r(" << myName << " has entered the room)\n";
+    save_chat_history(groups[groupName].groupHistory, "(" + myName + " has entered the room)");
 
     fd_set read_fds;
     char buf[4096];
@@ -268,18 +267,22 @@ void group_mode(int serverSocket, const std::string &groupName) {
 
             char token[4][4096];
             int argc = parse(res, token);
+            std::string msg = groups[groupName].groupCrypto->decrypt(res);
             std::string cmd = token[0];
-            if(cmd == "_exit") {
-                std::cout << "\33[2K\r(" << token[1] << " has left the room)\n";
-                save_chat_history(groups[groupName].groupHistory, "(" + std::string(token[1]) + " has left the room)");
-                
+            if(cmd == "_exit" || cmd == "_join") {
+                if(cmd == "_exit") {
+                    std::cout << "\33[2K\r(" << token[1] << " has left the room)\n";
+                    save_chat_history(groups[groupName].groupHistory, "(" + std::string(token[1]) + " has left the room)");
+                }
+                else {
+                    std::cout << "\33[2K\r(" << token[1] << " has entered the room)\n";
+                    save_chat_history(groups[groupName].groupHistory, "(" + std::string(token[1]) + " has entered the room)");
+                }
+
                 std::string targetIP = token[2];
                 int targetPort = atoi(token[3]);
 
-                if(isSelfConnection(targetIP, targetPort, listenPort)) {
-                    groups[groupName].groupCrypto->set_random_group_key();
-                }
-                else {
+                if(!isSelfConnection(targetIP, targetPort, listenPort)) {
                     // std::cout << "[CLIENT] Connecting to " << targetIP << ":" << targetPort << "...\n";
                     groupSocket = socket(AF_INET, SOCK_STREAM, 0);
                     if(groupSocket < 0) {
@@ -312,20 +315,21 @@ void group_mode(int serverSocket, const std::string &groupName) {
                 }
             }
             else {
-                std::cout << "\33[2K\r" << res << "\n";
-                save_chat_history(groups[groupName].groupHistory, res);
+                std::cout << "\33[2K\r" << msg << "\n";
+                save_chat_history(groups[groupName].groupHistory, msg);
             }
         }
         if(FD_ISSET(STDIN_FILENO, &read_fds)) {
             std::string input;
             if(!getline(std::cin, input) || input == "_exit") {
-                std::cout << "\33[2K\r(" << myName << " has left the room)\n";
+                std::cout << "\033[A\33[2K\r(" << myName << " has left the room)\n";
                 save_chat_history(groups[groupName].groupHistory, "(" + myName + " has left the room)");
                 send_all(serverSocket, "_exit\n");
                 break;
             }
             std::cout << "\033[A\33[2K\r";
-            send_all(serverSocket, myName + ": " + input);
+            std::string msg = groups[groupName].groupCrypto->encrypt(myName + ": " + input);
+            send_all(serverSocket, msg);
             // save_chat_history(groups[groupName].groupHistory, myName + ": " + input);
         }
     }
@@ -377,6 +381,16 @@ void* listener(void* arg) {
                 std::string groupName = token[2];
                 send_all(csock, groups[groupName].groupCrypto->get_group_key());
                 safe_close(csock);
+                continue;
+            }
+            else if(cmd == "S") {
+                std::cerr << "hello\n";
+                std::string groupName = token[1];
+                groups[groupName].groupCrypto->set_random_group_key();
+                send_all(csock, "_ACK\n");
+                safe_close(csock);
+                std::cerr << "hello2\n";
+                continue;
             }
             else {
                 safe_close(csock);
@@ -427,7 +441,7 @@ int main(int argc, char** argv) {
 
     std::cout << "Connected to server\n";
     std::cout << "Commands: register <username> <password> | login <username> <password> <client_listen_port> | logout | list | quit\n"
-              << "        | chat <username> | group | create <groupname> | join <groupname> \n";
+              << "        | chat <username> | group | create <groupname> | join <groupname> | send <username> <filename>\n";
 
     std::string line;
     while (true) {
@@ -562,11 +576,10 @@ int main(int argc, char** argv) {
                         char resToken[4][4096];
                         int resArgc = parse(res, resToken);
 
-                        std::string targetIP = resToken[0];
-                        int targetPort = atoi(resToken[1]);
+                        std::string targetIP = resToken[2];
+                        int targetPort = atoi(resToken[3]);
 
                         if(isSelfConnection(targetIP, targetPort, listenPort)) {
-                            groups[groupName].groupCrypto->set_random_group_key();
                             group_mode(mySocket, groupName);
                             continue;
                         }
@@ -608,6 +621,7 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                // else if(cmd == "send")
                 send_all(mySocket, line + "\n");
                 std::string res;
                 if(receive_all(mySocket, res) < 0) break;

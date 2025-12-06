@@ -41,6 +41,12 @@ pthread_mutex_t userMutex = PTHREAD_MUTEX_INITIALIZER;
 
 std::map<int, Crypto*> clientCryptos;
 
+// void handy_start() {
+//     users["a"].password = "a";
+//     users["b"].password = "b";
+//     users["c"].password = "c";
+// }
+
 bool findRepeatIPPort(std::string IP, int port) {
     if (IP == myIP && port == myPort) {
         return true;
@@ -308,32 +314,60 @@ int doJoin(int clientSocket, char token[4][4096], std::string& myUsername) {
         res = -1;
     }
     else if(!users[myUsername].groups.count(groupname)){
-        if(groups[groupname].admin == nullptr) { // no one's active -> set the joiner as the admin
-            groups[groupname].admin = &users[myUsername];
-        }
-        std::string IP = groups[groupname].admin->IP;
-        int port = groups[groupname].admin->port;
-        send_all(clientSocket, IP + " " + std::to_string(port) + "\n");
         groups[groupname].members.push_back(&users[myUsername]);
         users[myUsername].groups[groupname] = myUsername;
         users[myUsername].currentGroup = groupname;
+
+        groups[groupname].admin = nullptr;
         for(std::deque<UserData*>::iterator it = groups[groupname].members.begin(); it != groups[groupname].members.end(); it++) {
             if((*it)->currentGroup == groupname) {
-                send_all((*it)->sockfd, "(" + myUsername + " entered the room)\n");
+                if(groups[groupname].admin == nullptr) {
+                    groups[groupname].admin = (*it);
+                    std::string targetIP = groups[groupname].admin->IP;
+                    int targetPort = groups[groupname].admin->port;
+                    int groupSocket = socket(AF_INET, SOCK_STREAM, 0);
+                    sockaddr_in groupAddr;
+                    groupAddr.sin_family = AF_INET;
+                    groupAddr.sin_port = htons(targetPort);
+                    inet_pton(AF_INET, targetIP.c_str(), &groupAddr.sin_addr);
+                    connect(groupSocket, (struct sockaddr*)&groupAddr, sizeof(groupAddr));
+                    send_all(groupSocket, "S " + groupname + "\n");
+                    std::string w;
+                    receive_all(groupSocket, w);
+                    safe_close(groupSocket);
+                    send_all((*it)->sockfd, "_join " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
+                }
+                else {
+                    send_all((*it)->sockfd, "_join " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
+                }
             }
         }
     }
     else {
-        if(groups[groupname].admin == nullptr) { // no one's active -> set the joiner as the admin
-            groups[groupname].admin = &users[myUsername];
-        }
-        std::string IP = groups[groupname].admin->IP;
-        int port = groups[groupname].admin->port;
-        send_all(clientSocket, IP + " " + std::to_string(port) + "\n");
         users[myUsername].currentGroup = groupname;
+        
+        groups[groupname].admin = nullptr;
         for(std::deque<UserData*>::iterator it = groups[groupname].members.begin(); it != groups[groupname].members.end(); it++) {
             if((*it)->currentGroup == groupname) {
-                send_all((*it)->sockfd, "(" + myUsername + " entered the room)\n");
+                if(groups[groupname].admin == nullptr) {
+                    groups[groupname].admin = (*it);
+                    std::string targetIP = groups[groupname].admin->IP;
+                    int targetPort = groups[groupname].admin->port;
+                    int groupSocket = socket(AF_INET, SOCK_STREAM, 0);
+                    sockaddr_in groupAddr;
+                    groupAddr.sin_family = AF_INET;
+                    groupAddr.sin_port = htons(targetPort);
+                    inet_pton(AF_INET, targetIP.c_str(), &groupAddr.sin_addr);
+                    connect(groupSocket, (struct sockaddr*)&groupAddr, sizeof(groupAddr));
+                    send_all(groupSocket, "S " + groupname + "\n");
+                    std::string w;
+                    receive_all(groupSocket, w);
+                    safe_close(groupSocket);
+                    send_all((*it)->sockfd, "_join " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
+                }
+                else {
+                    send_all((*it)->sockfd, "_join " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
+                }
             }
         }
     }
@@ -354,7 +388,7 @@ int doQuit(int clientSocket, char token[4][4096], std::string& myUsername) {
     return res;
 }
 
-int doSend(int clientSocket, std::string& message, std::string& myUsername) {
+int doMsg(int clientSocket, std::string& message, std::string& myUsername) {
     std::string groupname = users[myUsername].currentGroup;
     int res = 0;
     pthread_mutex_lock(&userMutex);
@@ -366,8 +400,23 @@ int doSend(int clientSocket, std::string& message, std::string& myUsername) {
             if((*it)->currentGroup == groupname) {
                 if(groups[groupname].admin == nullptr) {
                     groups[groupname].admin = (*it);
+                    std::string targetIP = groups[groupname].admin->IP;
+                    int targetPort = groups[groupname].admin->port;
+                    int groupSocket = socket(AF_INET, SOCK_STREAM, 0);
+                    sockaddr_in groupAddr;
+                    groupAddr.sin_family = AF_INET;
+                    groupAddr.sin_port = htons(targetPort);
+                    inet_pton(AF_INET, targetIP.c_str(), &groupAddr.sin_addr);
+                    connect(groupSocket, (struct sockaddr*)&groupAddr, sizeof(groupAddr));
+                    send_all(groupSocket, "S " + groupname + "\n");
+                    std::string w;
+                    receive_all(groupSocket, w);
+                    safe_close(groupSocket);
+                    send_all((*it)->sockfd, "_exit " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
                 }
-                send_all((*it)->sockfd, "_exit " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
+                else {
+                    send_all((*it)->sockfd, "_exit " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
+                }
             }
         }
     }
@@ -489,7 +538,7 @@ void* clientHandler(void* arg) {
             }
         }
         else if(myState == GROUPING) {
-            if(doSend(clientSocket, line, username) < 0) {
+            if(doMsg(clientSocket, line, username) < 0) {
                 myState = IDLE;
             }
         }
@@ -508,6 +557,7 @@ void* clientHandler(void* arg) {
 }
 
 int main(int argc, char** argv) {
+    // handy_start();
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <port>\n";
         return 1;
