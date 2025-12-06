@@ -1,7 +1,8 @@
 .vscode
 b12901066
 b12901066.zip
-client*
+*.in
 demo.md
 code_*
 bin
+.DS_Store

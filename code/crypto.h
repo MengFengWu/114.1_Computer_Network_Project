@@ -44,4 +44,26 @@ class Crypto {
         std::string decrypt(const std::string& hex_ciphertext);
 };
 
+class GroupCrypto {
+    private:
+        unsigned char group_key[32]; // AES-256 key
+
+    public:
+        GroupCrypto() {
+            RAND_bytes(group_key, 32); // 32 bytes = 256 bits
+        }
+
+        ~GroupCrypto() {
+        }
+
+        std::string get_group_key();
+
+        void set_random_group_key();
+        void set_group_key(const std::string& key_str);
+
+        std::string encrypt(const std::string& plaintext);
+
+        std::string decrypt(const std::string& hex_ciphertext);
+};
+
 #endif

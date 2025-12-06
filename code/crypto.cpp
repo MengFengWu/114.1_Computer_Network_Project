@@ -124,4 +124,74 @@ std::string Crypto::decrypt(const std::string& hex_ciphertext) {
     return std::string((char*)plaintext.data(), plaintext_len);
 }
 
+// ----
+
+std::string GroupCrypto::get_group_key() {
+    return std::string(reinterpret_cast<const char*>(group_key), 32);
+}
+
+void GroupCrypto::set_random_group_key() {
+    RAND_bytes(group_key, 32);
+}
+
+void GroupCrypto::set_group_key(const std::string& key_str) {
+    if (key_str.size() != 32) {
+        return; 
+    }
+    std::memcpy(group_key, key_str.data(), 32);
+}
+
+std::string GroupCrypto::encrypt(const std::string& plaintext) {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    unsigned char iv[16] = {0}; // Zero IV for simplicity (use random in prod)
+    
+    // Output buffer (input len + block size)
+    std::vector<unsigned char> ciphertext(plaintext.size() + AES_BLOCK_SIZE);
+    int len, ciphertext_len;
+
+    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, group_key, iv);
+    EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (unsigned char*)plaintext.c_str(), plaintext.size());
+    ciphertext_len = len;
+    EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
+    ciphertext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    // Base64 Encode the ciphertext so we can send it as a string
+    // (Simplified manual hex string for this homework to avoid base64 lib dependency)
+    std::string hex_out;
+    char buf[3];
+    for(int i=0; i<ciphertext_len; i++) {
+        snprintf(buf, 3, "%02x", ciphertext[i]);
+        hex_out += buf;
+    }
+    return hex_out;
+}
+
+std::string GroupCrypto::decrypt(const std::string& hex_ciphertext) {
+    // Convert Hex string back to bytes
+    std::vector<unsigned char> ciphertext;
+    for (size_t i = 0; i < hex_ciphertext.length(); i += 2) {
+        std::string byteString = hex_ciphertext.substr(i, 2);
+        unsigned char byte = (unsigned char)strtol(byteString.c_str(), NULL, 16);
+        ciphertext.push_back(byte);
+    }
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    unsigned char iv[16] = {0};
+    std::vector<unsigned char> plaintext(ciphertext.size() + AES_BLOCK_SIZE);
+    int len, plaintext_len;
+
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, group_key, iv);
+    EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext.data(), ciphertext.size());
+    plaintext_len = len;
+    EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len);
+    plaintext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+    
+    // Remove padding and return string
+    return std::string((char*)plaintext.data(), plaintext_len);
+}
+
 #endif
