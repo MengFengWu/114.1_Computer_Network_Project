@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 
 #include <iostream>
+#include <fstream>
 #include <errno.h>
 #include <unistd.h>
 
@@ -29,7 +30,7 @@ std::map<std::string, std::deque<std::string>> chatHistory;
 
 struct groupData {
     std::deque<std::string> groupHistory;
-    GroupCrypto* groupCrypto;
+    GroupCrypto groupCrypto;
 };
 
 std::map<std::string, groupData> groups;
@@ -39,6 +40,7 @@ enum state{
     PENDING,
     CHATTING,
     GROUPING,
+    WAITFILE
 };
 
 state clientState = IDLE;
@@ -174,16 +176,65 @@ bool send_request(int socket, const std::string &message, const std::string type
     send_all(socket, type + " " + message);
     std::string res;
     if(receive_all(socket, res) < 0) return false;
-    if(type == "C") {
+    if(type == "C" || type == "F") {
         if(res == "y") return true;
         else return false;
     }
     else if(type == "G") {
         std::string groupName = token[1];
-        groups[groupName].groupCrypto->set_group_key(res);
+        groups[groupName].groupCrypto.set_group_key(res);
         return true;
     }
     else return false;
+}
+
+int send_file(int sockfd, const std::string &filename) {
+    std::fstream file;
+    file.open(filename, std::ios::in);
+    if(!file) {
+        return -1;
+    }
+    char buf[2048];
+    while(file.read(buf, sizeof(buf) - 1) || file.gcount() > 0) {
+        std::streamsize bytes_read = file.gcount();
+        std::string chunk(buf, bytes_read);
+        std::string encryptedMsg = clientCryptos[sockfd]->encrypt(chunk);
+        send(sockfd, encryptedMsg.c_str(), encryptedMsg.size(), 0);
+        recv(sockfd, buf, sizeof(buf) - 1, 0);
+        if (!file) break;
+
+    }
+    return 0;
+}
+
+int receive_file(int sockfd, const std::string &filename) {
+    std::fstream file;
+    file.open(filename, std::ios::out);
+    if(!file) {
+        return -1;
+    }
+    char buf[16384];
+    ssize_t bytes_received;
+    while (true) {
+        bytes_received = recv(sockfd, buf, sizeof(buf) - 1, 0);
+        if (bytes_received <= 0) return -1;
+        buf[bytes_received] = '\0';
+        std::string res = buf;
+        res = clientCryptos[sockfd]->decrypt(res);
+        send(sockfd, "ACK", std::string("ACK").size(), 0);
+
+        if (bytes_received > 0) {
+            file.write(res.c_str(), res.size());
+        } 
+        else if (bytes_received == 0) {
+            break;
+        } 
+        else {
+            return -1;
+        }
+    }
+    file.close();
+    return 0;
 }
 
 void chat_mode() {
@@ -267,7 +318,7 @@ void group_mode(int serverSocket, const std::string &groupName) {
 
             char token[4][4096];
             int argc = parse(res, token);
-            std::string msg = groups[groupName].groupCrypto->decrypt(res);
+            std::string msg = groups[groupName].groupCrypto.decrypt(res);
             std::string cmd = token[0];
             if(cmd == "_exit" || cmd == "_join") {
                 if(cmd == "_exit") {
@@ -328,7 +379,7 @@ void group_mode(int serverSocket, const std::string &groupName) {
                 break;
             }
             std::cout << "\033[A\33[2K\r";
-            std::string msg = groups[groupName].groupCrypto->encrypt(myName + ": " + input);
+            std::string msg = groups[groupName].groupCrypto.encrypt(myName + ": " + input);
             send_all(serverSocket, msg);
             // save_chat_history(groups[groupName].groupHistory, myName + ": " + input);
         }
@@ -379,18 +430,24 @@ void* listener(void* arg) {
             }
             else if(cmd == "G") {
                 std::string groupName = token[2];
-                send_all(csock, groups[groupName].groupCrypto->get_group_key());
+                send_all(csock, groups[groupName].groupCrypto.get_group_key());
                 safe_close(csock);
                 continue;
             }
-            else if(cmd == "S") {
-                std::cerr << "hello\n";
+            else if(cmd == "S" && clientState != PENDING && clientState != WAITFILE) {
+                // std::cout << "S detected\n";
                 std::string groupName = token[1];
-                groups[groupName].groupCrypto->set_random_group_key();
+                groups[groupName].groupCrypto.set_random_group_key();
                 send_all(csock, "_ACK\n");
                 safe_close(csock);
-                std::cerr << "hello2\n";
                 continue;
+            }
+            else if(cmd == "F") {
+                peerSocket = csock;
+                peerName = token[1];
+                std::cout << "\n[REQUEST] " << peerName << " wants to send a file to you, accept? (y/n)\n> " << std::flush;
+
+                clientState = WAITFILE;
             }
             else {
                 safe_close(csock);
@@ -484,24 +541,6 @@ int main(int argc, char** argv) {
                         continue;
                     }
                 }
-                else if(cmd == "create") {
-                    if(argc == 2) {
-                        send_all(mySocket, line + "\n");
-                        std::string res;
-                        if(receive_all(mySocket, res) < 0) break;
-
-                        if(res.find("Create failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
-                            std::cout << "[SERVER] " << res << std::endl;
-                            continue;
-                        }
-
-                        std::string groupName = token[1];
-                        groups[groupName].groupCrypto = new GroupCrypto;
-
-                        std::cout << "[SERVER] " << res << std::endl;
-                        continue;
-                    }
-                }
                 else if(cmd == "chat") {
                     if(argc == 2) {
                         send_all(mySocket, line + "\n");
@@ -565,7 +604,7 @@ int main(int argc, char** argv) {
 
                         std::string groupName = token[2];
                         if(!groups.count(groupName)) {
-                            groups[groupName].groupCrypto = new GroupCrypto;
+                            groups[groupName].groupCrypto.set_random_group_key();
                         }
 
                         if(res.find("Join failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
@@ -621,7 +660,67 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
-                // else if(cmd == "send")
+                else if(cmd == "send") {
+                    if(argc == 3) {
+                        send_all(mySocket, line + "\n");
+                        std::string res;
+                        if(receive_all(mySocket, res) < 0) break;
+
+                        if(res.find("Send failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
+                            std::cout << "[SERVER] " << res << std::endl;
+                            continue;
+                        }
+
+                        char resToken[4][4096];
+                        int resArgc = parse(res, resToken);
+
+                        std::string targetIP = resToken[0];
+                        int targetPort = atoi(resToken[1]);
+                        peerName = token[1];
+                        std::string fileName = token[2];
+
+                        std::cout << "[CLIENT] Connecting to " << targetIP << ":" << targetPort << "...\n";
+
+                        peerSocket = socket(AF_INET, SOCK_STREAM, 0);
+                        if(peerSocket < 0) {
+                            perror("Error");
+                            std::cout << "[CLIENT] Connection failed, please retry later\n";
+                            peerSocket = -1;
+                            peerName = "";
+                            continue;
+                        }
+                        sockaddr_in peerAddr;
+                        peerAddr.sin_family = AF_INET;
+                        peerAddr.sin_port = htons(targetPort);
+                        inet_pton(AF_INET, targetIP.c_str(), &peerAddr.sin_addr);
+                        if(connect(peerSocket, (struct sockaddr*)&peerAddr, sizeof(peerAddr)) < 0) {
+                            perror("Error");
+                            std::cout << "[CLIENT] Connection failed, please retry later\n";
+                            safe_close(peerSocket);
+                            peerSocket = -1;
+                            peerName = "";
+                            continue;
+                        }
+                        else {
+                            if(send_request(peerSocket, myName, "F")) {
+                                if(send_file(peerSocket, fileName) < 0) {
+                                    std::cout << "[CLIENT] File transission failed, please retry later\n";
+                                }
+                                safe_close(peerSocket);
+                                peerSocket = -1;
+                                peerName = "";
+                                continue;
+                            }
+                            else {
+                                std::cout << "[CLIENT] Connection refused\n";
+                                safe_close(peerSocket);
+                                peerSocket = -1;
+                                peerName = "";
+                                continue;
+                            }
+                        }
+                    }
+                }
                 send_all(mySocket, line + "\n");
                 std::string res;
                 if(receive_all(mySocket, res) < 0) break;
@@ -632,6 +731,31 @@ int main(int argc, char** argv) {
                 if(line == "y") {
                     send_all(peerSocket, "y\n");
                     chat_mode();
+                }
+                else if(line == "n") {
+                    send_all(peerSocket, "n\n");
+                    safe_close(peerSocket);
+                    peerSocket = -1;
+                    peerName = "";
+                    clientState = IDLE;
+                }
+            }
+            else if(clientState == WAITFILE) {
+                if(line == "y") {
+                    std::cout << "[REQUEST] Please enter the file name\n> " << std::flush;
+                    std::string fileName;
+                    std::cin >> fileName;
+                    send_all(peerSocket, "y\n");
+                    if(fileName.empty()) {
+                        receive_file(peerSocket, "download");
+                    }
+                    else {
+                        receive_file(peerSocket, fileName);
+                    }
+                    safe_close(peerSocket);
+                    peerSocket = -1;
+                    peerName = "";
+                    clientState = IDLE;
                 }
                 else if(line == "n") {
                     send_all(peerSocket, "n\n");

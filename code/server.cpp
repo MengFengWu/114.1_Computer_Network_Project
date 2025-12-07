@@ -41,11 +41,11 @@ pthread_mutex_t userMutex = PTHREAD_MUTEX_INITIALIZER;
 
 std::map<int, Crypto*> clientCryptos;
 
-// void handy_start() {
-//     users["a"].password = "a";
-//     users["b"].password = "b";
-//     users["c"].password = "c";
-// }
+void handy_start() {
+    users["a"].password = "a";
+    users["b"].password = "b";
+    users["c"].password = "c";
+}
 
 bool findRepeatIPPort(std::string IP, int port) {
     if (IP == myIP && port == myPort) {
@@ -331,9 +331,11 @@ int doJoin(int clientSocket, char token[4][4096], std::string& myUsername) {
                     groupAddr.sin_port = htons(targetPort);
                     inet_pton(AF_INET, targetIP.c_str(), &groupAddr.sin_addr);
                     connect(groupSocket, (struct sockaddr*)&groupAddr, sizeof(groupAddr));
+                    Crypto *crypto = crypto_init(groupSocket);
                     send_all(groupSocket, "S " + groupname + "\n");
                     std::string w;
                     receive_all(groupSocket, w);
+                    // std::cout << "received: " << w << "\n";
                     safe_close(groupSocket);
                     send_all((*it)->sockfd, "_join " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
                 }
@@ -359,9 +361,11 @@ int doJoin(int clientSocket, char token[4][4096], std::string& myUsername) {
                     groupAddr.sin_port = htons(targetPort);
                     inet_pton(AF_INET, targetIP.c_str(), &groupAddr.sin_addr);
                     connect(groupSocket, (struct sockaddr*)&groupAddr, sizeof(groupAddr));
+                    Crypto *crypto = crypto_init(groupSocket);
                     send_all(groupSocket, "S " + groupname + "\n");
                     std::string w;
                     receive_all(groupSocket, w);
+                    // std::cout << "received: " << w << "\n";
                     safe_close(groupSocket);
                     send_all((*it)->sockfd, "_join " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
                 }
@@ -370,6 +374,27 @@ int doJoin(int clientSocket, char token[4][4096], std::string& myUsername) {
                 }
             }
         }
+    }
+    pthread_mutex_unlock(&userMutex);
+    return res;
+}
+
+int doSend(int clientSocket, char token[4][4096], std::string& myUsername) {
+    std::string username = token[1];
+    int res = 0;
+    pthread_mutex_lock(&userMutex);
+    if(myUsername == "\0") {
+        send_all(clientSocket, "Send failed: you are not logined yet\n");
+        res = -1;
+    }
+    else if(!users.count(username) || users[username].online == false || username == myUsername) {
+        send_all(clientSocket, "Send failed: username is invalid or it's not online\n");
+        res = -1;
+    }
+    else {
+        std::string IP = users[username].IP;
+        int port = users[username].port;
+        send_all(clientSocket, users[username].IP + " " + std::to_string(port) + "\n");
     }
     pthread_mutex_unlock(&userMutex);
     return res;
@@ -408,9 +433,11 @@ int doMsg(int clientSocket, std::string& message, std::string& myUsername) {
                     groupAddr.sin_port = htons(targetPort);
                     inet_pton(AF_INET, targetIP.c_str(), &groupAddr.sin_addr);
                     connect(groupSocket, (struct sockaddr*)&groupAddr, sizeof(groupAddr));
+                    Crypto *crypto = crypto_init(groupSocket);
                     send_all(groupSocket, "S " + groupname + "\n");
                     std::string w;
                     receive_all(groupSocket, w);
+                    // std::cout << "received: " << w << "\n";
                     safe_close(groupSocket);
                     send_all((*it)->sockfd, "_exit " + myUsername + " " + groups[groupname].admin->IP + " " + std::to_string(groups[groupname].admin->port) + "\n");
                 }
@@ -525,6 +552,13 @@ void* clientHandler(void* arg) {
                     myState = GROUPING;
                 }
             }
+            else if(cmd == "send") {
+                if(argc != 3) {
+                    send_all(clientSocket, "Invalid command\n");
+                    continue;
+                }
+                doChat(clientSocket, token, username);
+            }
             else if(cmd == "quit") {
                 if(argc != 1) {
                     send_all(clientSocket, "Invalid command\n");
@@ -557,7 +591,7 @@ void* clientHandler(void* arg) {
 }
 
 int main(int argc, char** argv) {
-    // handy_start();
+    handy_start();
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <port>\n";
         return 1;
