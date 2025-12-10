@@ -10,7 +10,14 @@
 
 #include <map>
 #include <deque>
+#include <queue>
+#include <vector>
 #define MAX_PORT_NUM 65535
+#define THREAD_POOL_SIZE 10
+
+std::queue<int*> connectionQueue;
+pthread_mutex_t poolMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t poolCond = PTHREAD_COND_INITIALIZER;
 
 int myPort;
 std::string myIP;
@@ -459,139 +466,153 @@ int doMsg(int clientSocket, std::string& message, std::string& myUsername) {
 }
 
 void* clientHandler(void* arg) {
-    int clientSocket = *(int*)arg;
-    delete (int*)arg;
-    char buf[4096];
+    while(true){
+        int* pSocket = nullptr;
 
-    sockaddr_in addr;
-    socklen_t len = sizeof(addr);
-    getpeername(clientSocket, (struct sockaddr*)&addr, &len);
-    std::string clientIP = inet_ntoa(addr.sin_addr);
-
-    std::string username = "\0";
-    userState myState = IDLE;
-
-    Crypto *crypto = crypto_init(clientSocket);
-    if(crypto == nullptr) {
-        safe_close(clientSocket);
-        pthread_exit(nullptr);
-    }
-
-    while(true) {
-        std::string line;
-        if(receive_all(clientSocket, line) < 0) {
-            break;
+        // Wait for connection
+        pthread_mutex_lock(&poolMutex);
+        while (connectionQueue.empty()) {
+            pthread_cond_wait(&poolCond, &poolMutex);
         }
+        pSocket = connectionQueue.front();
+        connectionQueue.pop();
+        pthread_mutex_unlock(&poolMutex);
 
-        // std::cout << "received: " << line << "\n";
-        if(line.empty()) {
-            send_all(clientSocket, "Invalid command\n");
+        // Get client socket
+        int clientSocket = *pSocket;
+        delete pSocket;
+        char buf[4096];
+
+        sockaddr_in addr;
+        socklen_t len = sizeof(addr);
+        getpeername(clientSocket, (struct sockaddr*)&addr, &len);
+        std::string clientIP = inet_ntoa(addr.sin_addr);
+
+        std::string username = "\0";
+        userState myState = IDLE;
+
+        Crypto *crypto = crypto_init(clientSocket);
+        if(crypto == nullptr) {
+            safe_close(clientSocket);
             continue;
         }
-        char token[4][4096];
-        int argc = parse(line, token);
 
-        std::string cmd = token[0];
-
-        if(myState == IDLE) {
-            if (cmd == "register") {
-                if(argc != 3) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doRegister(clientSocket, token, username);
-            }
-            else if(cmd == "login") {
-                if(argc != 4) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doLogin(clientSocket, token, username, clientIP);
-            }
-            else if(cmd == "logout") {
-                if(argc != 1) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doLogout(clientSocket, token, username);
-            }
-            else if(cmd == "list") {
-                if(argc != 1) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doList(clientSocket, token, username);
-            }
-            else if(cmd == "chat") {
-                if(argc != 2) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doChat(clientSocket, token, username);
-            }
-            else if(cmd == "group") {
-                if(argc != 1) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doGroup(clientSocket, token, username);
-            }
-            else if(cmd == "create") {
-                if(argc != 2) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doCreate(clientSocket, token, username);
-            }
-            else if(cmd == "join") {
-                if(argc != 2) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                if(doJoin(clientSocket, token, username) >= 0) {
-                    myState = GROUPING;
-                }
-            }
-            else if(cmd == "send") {
-                if(argc != 3) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doChat(clientSocket, token, username);
-            }
-            else if(cmd == "quit") {
-                if(argc != 1) {
-                    send_all(clientSocket, "Invalid command\n");
-                    continue;
-                }
-                doQuit(clientSocket, token, username);
+        while(true) {
+            std::string line;
+            if(receive_all(clientSocket, line) < 0) {
                 break;
             }
-            else {
-                send_all(clientSocket, "Invalid command\n");
-            }
-        }
-        else if(myState == GROUPING) {
-            if(doMsg(clientSocket, line, username) < 0) {
-                myState = IDLE;
-            }
-        }
-    }
 
-    if(username != "\0") {
-        pthread_mutex_lock(&userMutex);
-        users[username].online = false;
-        users[username].IP = "";
-        users[username].port = 0;
-        username = "\0";
-        pthread_mutex_unlock(&userMutex);
+            // std::cout << "received: " << line << "\n";
+            if(line.empty()) {
+                send_all(clientSocket, "Invalid command\n");
+                continue;
+            }
+            char token[4][4096];
+            int argc = parse(line, token);
+
+            std::string cmd = token[0];
+
+            if(myState == IDLE) {
+                if (cmd == "register") {
+                    if(argc != 3) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doRegister(clientSocket, token, username);
+                }
+                else if(cmd == "login") {
+                    if(argc != 4) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doLogin(clientSocket, token, username, clientIP);
+                }
+                else if(cmd == "logout") {
+                    if(argc != 1) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doLogout(clientSocket, token, username);
+                }
+                else if(cmd == "list") {
+                    if(argc != 1) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doList(clientSocket, token, username);
+                }
+                else if(cmd == "chat") {
+                    if(argc != 2) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doChat(clientSocket, token, username);
+                }
+                else if(cmd == "group") {
+                    if(argc != 1) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doGroup(clientSocket, token, username);
+                }
+                else if(cmd == "create") {
+                    if(argc != 2) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doCreate(clientSocket, token, username);
+                }
+                else if(cmd == "join") {
+                    if(argc != 2) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    if(doJoin(clientSocket, token, username) >= 0) {
+                        myState = GROUPING;
+                    }
+                }
+                else if(cmd == "send") {
+                    if(argc != 3) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doChat(clientSocket, token, username);
+                }
+                else if(cmd == "quit") {
+                    if(argc != 1) {
+                        send_all(clientSocket, "Invalid command\n");
+                        continue;
+                    }
+                    doQuit(clientSocket, token, username);
+                    break;
+                }
+                else {
+                    send_all(clientSocket, "Invalid command\n");
+                }
+            }
+            else if(myState == GROUPING) {
+                if(doMsg(clientSocket, line, username) < 0) {
+                    myState = IDLE;
+                }
+            }
+        }
+
+        if(username != "\0") {
+            pthread_mutex_lock(&userMutex);
+            users[username].online = false;
+            users[username].IP = "";
+            users[username].port = 0;
+            username = "\0";
+            pthread_mutex_unlock(&userMutex);
+        }
+        safe_close(clientSocket);
     }
-    safe_close(clientSocket);
-    pthread_exit(nullptr);
+    return nullptr;
 }
 
 int main(int argc, char** argv) {
-    handy_start();
+    // handy_start();
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <port>\n";
         return 1;
@@ -621,13 +642,21 @@ int main(int argc, char** argv) {
     }
     std::cout << "Server listening on 127.0.0.1:" << myPort << "\n";
 
+    // Create thread pool
+    std::vector<pthread_t> threadPool(THREAD_POOL_SIZE);
+    for(int i = 0; i < THREAD_POOL_SIZE; ++i) {
+        pthread_create(&threadPool[i], nullptr, clientHandler, nullptr);
+        pthread_detach(threadPool[i]);
+    }
+
     while(true) {
         sockaddr_in clientAddress;
         socklen_t len = sizeof(clientAddress);
         int *clientSocket = new int(accept(serverSocket, (sockaddr*)&clientAddress, &len));
-        pthread_t tid;
-        pthread_create(&tid, nullptr, clientHandler, clientSocket);
-        pthread_detach(tid);
+        pthread_mutex_lock(&poolMutex);
+        connectionQueue.push(clientSocket);
+        pthread_cond_signal(&poolCond); // wake up one thread
+        pthread_mutex_unlock(&poolMutex);
     }
 
     safe_close(serverSocket);
