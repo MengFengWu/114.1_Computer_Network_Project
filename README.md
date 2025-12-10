@@ -41,23 +41,71 @@ make clean
 
 ### `register <username> <password>`
 
-Register to the server (must used when client is not logged in yet).
-If `<username>` already exists, `register` will fail.
+Register a new account on the server. Use this only when the client is not logged in.
+- **Format**: `register alice s3cr3t`
+- **Success**: Server confirms "Register successed".
+- **Failure**: Username already exists or user is already logged in.
 
 ### `login <username> <password> <client_listen_port>`
 
-Login to the server, `<username>` and `<password>` must match the data in the server.
-Client should also provide `<client_listen_port>` (though not used in phase 1), the port number should not be repeated if two clients have same IP address.
-`login` must be use when client is not logged in yet.
+Authenticate and mark the user as online. The `<client_listen_port>` is the local port this client will open to accept direct Peer-to-Peer (P2P) connections.
+- **Format**: `login alice s3cr3t 9001`
+- **Success**: Server confirms login, starts a listener thread on the specified port, and marks the user as online.
+- **Failure**: Wrong username/password, port conflict (port already used by another user or valid range error), or user already logged in.
 
 ### `logout`
 
-Logout from the server, must be used when the user is logged in.
+Log out the currently logged-in user and mark them as offline on the server.
+- **Format**: `logout`
+- **Success**: Server confirms "Logout successed".
+- **Failure**: If no user is currently logged in.
 
 ### `list`
 
-List all online users (i.e., users that are currently logged in), must be used when the user is logged in.
+Request the server to return the list of currently online users.
+- **Format**: `list`
+- **Success**: Server displays a list of online usernames.
+- **Failure**: If the client is not logged in.
+
+### `chat <username>`
+
+Initiate a private P2P chat session with another online user. The client queries the server for the target's IP/Port, then connects directly.
+- **Format**: `chat bob`
+- **Success**: Target accepts the request (`y`), and both users enter **Chat Mode**.
+- **Failure**: Target rejects the request (`n`), target is offline, or connection errors.
+- **Note**: Inside Chat Mode, type `_exit` to quit the chat and return to the main menu.
+
+### `group`
+
+Request the list of all available chat groups currently active on the server.
+- **Format**: `group`
+- **Success**: Server lists all existing group names.
+- **Failure**: If the client is not logged in.
+
+### `create <groupname>`
+
+Create a new chat group on the server.
+- **Format**: `create study_group`
+- **Success**: Server confirms "Create successed".
+- **Failure**: Group name already exists or user is not logged in.
+
+### `join <groupname>`
+
+Join an existing group chat. This initiates **Group Mode**, allowing messages to be broadcast to all group members.
+- **Format**: `join study_group`
+- **Success**: Client enters the group room and loads chat history.
+- **Failure**: Group does not exist or connection errors.
+- **Note**: Inside Group Mode, type `_exit` to leave the room and return to the main menu.
+
+### `send <username> <filename>`
+
+Send a file to another online user via a direct P2P connection.
+- **Format**: `send bob homework.txt`
+- **Success**: Target accepts the transfer (`y`,`save_path`) and the file is transmitted successfully.
+- **Failure**: Target rejects (`n`), file does not exist locally, or connection errors.
 
 ### `quit`
 
-Terminate the client process, if a user has logged it, `quit` will automatically log out that user.
+Terminate the client process. If a user is logged in, the client sends a quit signal to the server before exiting.
+- **Format**: `quit`
+- **Behavior**: Cleanly disconnects from the server and closes the application.
