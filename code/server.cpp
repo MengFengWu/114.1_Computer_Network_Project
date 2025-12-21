@@ -52,6 +52,7 @@ void handy_start() {
     users["a"].password = "a";
     users["b"].password = "b";
     users["c"].password = "c";
+    users["d"].password = "d";
 }
 
 bool findRepeatIPPort(std::string IP, int port) {
@@ -251,11 +252,11 @@ int doChat(int clientSocket, char token[4][4096], std::string& myUsername) {
     int res = 0;
     pthread_mutex_lock(&userMutex);
     if(myUsername == "\0") {
-        send_all(clientSocket, "Chat failed: you are not logined yet\n");
+        send_all(clientSocket, "Connect failed: you are not logined yet\n");
         res = -1;
     }
     else if(!users.count(username) || users[username].online == false || username == myUsername) {
-        send_all(clientSocket, "Chat failed: username is invalid or it's not online\n");
+        send_all(clientSocket, "Connect failed: username is invalid or it's not online\n");
         res = -1;
     }
     else {
@@ -423,6 +424,9 @@ int doQuit(int clientSocket, char token[4][4096], std::string& myUsername) {
 int doMsg(int clientSocket, std::string& message, std::string& myUsername) {
     std::string groupname = users[myUsername].currentGroup;
     int res = 0;
+    char token[4][4096];
+    int argc = parse(message, token);
+    std::string cmd = token[0];
     pthread_mutex_lock(&userMutex);
     if(message == "_exit") {
         res = -1;
@@ -453,6 +457,11 @@ int doMsg(int clientSocket, std::string& message, std::string& myUsername) {
                 }
             }
         }
+    }
+    else if(cmd == "send") {
+        pthread_mutex_unlock(&userMutex);
+        doChat(clientSocket, token, myUsername);
+        pthread_mutex_lock(&userMutex);
     }
     else {
         for(std::deque<UserData*>::iterator it = groups[groupname].members.begin(); it != groups[groupname].members.end(); it++) {
@@ -612,7 +621,7 @@ void* clientHandler(void* arg) {
 }
 
 int main(int argc, char** argv) {
-    // handy_start();
+    handy_start();
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <port>\n";
         return 1;

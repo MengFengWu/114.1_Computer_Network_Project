@@ -18,9 +18,13 @@
 std::string myName;
 int listenPort;
 int listenSocket = -1;
+int mySocket;
+bool isBusy = 0;
 
 int peerSocket = -1; 
 std::string peerName = "";
+int filePeerSocket = -1; 
+std::string filePeerName = "";
 
 int groupSocket = -1; 
 
@@ -40,7 +44,9 @@ enum state{
     PENDING,
     CHATTING,
     GROUPING,
-    WAITFILE
+    WAITFILE,
+    WAITNAME,
+    BUSY,
 };
 
 state clientState = IDLE;
@@ -182,6 +188,7 @@ bool send_request(int socket, const std::string &message, const std::string type
     }
     else if(type == "G") {
         std::string groupName = token[1];
+        // std::cout << "get group key of " << groupName << ": " << res << std::endl;
         groups[groupName].groupCrypto.set_group_key(res);
         return true;
     }
@@ -199,10 +206,12 @@ int send_file(int sockfd, const std::string &filename) {
         std::streamsize bytes_read = file.gcount();
         std::string chunk(buf, bytes_read);
         std::string encryptedMsg = clientCryptos[sockfd]->encrypt(chunk);
+        if(recv(sockfd, buf, sizeof(buf) - 1, 0) < 0) {
+            file.close();
+            return -1;
+        }
         send(sockfd, encryptedMsg.c_str(), encryptedMsg.size(), 0);
-        recv(sockfd, buf, sizeof(buf) - 1, 0);
         if (!file) break;
-
     }
     return 0;
 }
@@ -216,30 +225,82 @@ int receive_file(int sockfd, const std::string &filename) {
     char buf[16384];
     ssize_t bytes_received;
     while (true) {
+        send(sockfd, "ACK", std::string("ACK").size(), 0);
         bytes_received = recv(sockfd, buf, sizeof(buf) - 1, 0);
-        if (bytes_received <= 0) return -1;
+        if (bytes_received <= 0) break;
         buf[bytes_received] = '\0';
         std::string res = buf;
         res = clientCryptos[sockfd]->decrypt(res);
-        send(sockfd, "ACK", std::string("ACK").size(), 0);
 
-        if (bytes_received > 0) {
-            file.write(res.c_str(), res.size());
-        } 
-        else if (bytes_received == 0) {
-            break;
-        } 
-        else {
-            return -1;
-        }
+        file.write(res.c_str(), res.size());
     }
     file.close();
     return 0;
 }
 
+void* para_sent(void* arg) {
+    std::string input = *(std::string*)arg;
+
+    char resToken[4][4096];
+    int resArgc = parse(input, resToken);
+
+    std::string targetIP = resToken[0];
+    int targetPort = atoi(resToken[1]);
+    // filePeerName = token[1];
+    std::string fileName = resToken[2];
+
+    std::cout << "\33[2K\r" << "[CLIENT] Connecting to " << targetIP << ":" << targetPort << "...\n> " << std::flush;
+    state prevState = clientState;
+    isBusy = true;
+
+    filePeerSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if(filePeerSocket < 0) {
+        perror("Error");
+        std::cout << "\33[2K\r" << "[CLIENT] Connection failed, please retry later\n> " << std::flush;
+        filePeerSocket = -1;
+        filePeerName = "";
+        isBusy = false;
+        return nullptr;
+    }
+    sockaddr_in filePeerAddr;
+    filePeerAddr.sin_family = AF_INET;
+    filePeerAddr.sin_port = htons(targetPort);
+    inet_pton(AF_INET, targetIP.c_str(), &filePeerAddr.sin_addr);
+    if(connect(filePeerSocket, (struct sockaddr*)&filePeerAddr, sizeof(filePeerAddr)) < 0) {
+        perror("Error");
+        std::cout << "\33[2K\r" << "[CLIENT] Connection failed, please retry later\n> " << std::flush;
+        safe_close(filePeerSocket);
+        filePeerSocket = -1;
+        filePeerName = "";
+        isBusy = false;
+        return nullptr;
+    }
+    else {
+        if(send_request(filePeerSocket, myName, "F")) {
+            if(send_file(filePeerSocket, fileName) < 0) {
+                std::cout << "\33[2K\r" << "[CLIENT] File transission failed, please retry later\n> " << std::flush;
+            }
+            safe_close(filePeerSocket);
+            filePeerSocket = -1;
+            filePeerName = "";
+            isBusy = false;
+            return nullptr;
+        }
+        else {
+            std::cout << "\33[2K\r" << "[CLIENT] Connection refused\n> " << std::flush;
+            safe_close(filePeerSocket);
+            filePeerSocket = -1;
+            filePeerName = "";
+            isBusy = false;
+            return nullptr;
+        }
+    }
+}
+
 void chat_mode() {
-    std::cout << "---Entered Chat Room (Type \"_exit\" to quit)---\n";
+    std::cout << "---Entered Chat Room (Type \"_exit\" to quit, \"_send <username> <filename>\" to send file)---\n";
     clientState = CHATTING;
+    isBusy = false;
 
     print_chat_history(chatHistory[peerName]);
 
@@ -269,11 +330,83 @@ void chat_mode() {
             save_chat_history(chatHistory[peerName], peerName + ": " + res);
         }
         if(FD_ISSET(STDIN_FILENO, &read_fds)) {
-            std::string input;
-            if(!getline(std::cin, input) || input == "_exit") break;
-            std::cout << "\033[A\33[2K\r" << myName << ": " << input << "\n";
-            send_all(peerSocket, input);
-            save_chat_history(chatHistory[peerName], myName + ": " + input);
+            if(clientState != WAITFILE && clientState != WAITNAME) {
+                std::string input;
+                if(!getline(std::cin, input) || input == "_exit") break;
+
+                char token[4][4096];
+                int argc = parse(input, token);
+                std::string cmd = token[0];
+                
+                if(argc == 3 && cmd == "_send") {
+                    if(isBusy) {
+                        std::cout << "\33[2K\r" << "[CLIENT] " << "You are currently sending file. Please retry later\n" << std::flush;
+                        continue;
+                    }
+                    std::string input = "send " + std::string(token[1]) + " " + std::string(token[2]);
+
+                    char token[4][4096];
+                    int argc = parse(input, token);
+                    std::string cmd = token[0];
+                    std::string fileName = token[2];
+
+                    send_all(mySocket, input + "\n");
+                    std::string res;
+                    if(receive_all(mySocket, res) < 0) {
+                        continue;
+                    }
+
+                    if(res.find("Connect failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
+                        std::cout << "\33[2K\r" << "[SERVER] " << res << "\n> " << std::flush;
+                        continue;
+                    }
+
+                    std::string data = res + " " + fileName;
+
+                    pthread_t tid;
+                    pthread_create(&tid, nullptr, para_sent, &data);
+                    pthread_detach(tid);
+                    continue;
+                }
+
+                std::cout << "\033[A\33[2K\r" << myName << ": " << input << "\n";
+                send_all(peerSocket, input);
+                save_chat_history(chatHistory[peerName], myName + ": " + input);
+            }
+            else if(clientState == WAITFILE){
+                std::string line;
+                getline(std::cin, line);
+                if(line == "y") {
+                    std::cout << "[REQUEST] Please enter the file name\n" << std::flush;
+                    clientState = WAITNAME;
+                }
+                else {
+                    send_all(filePeerSocket, "n\n");
+                    safe_close(filePeerSocket);
+                    filePeerSocket = -1;
+                    filePeerName = "";
+                    clientState = CHATTING;
+                }
+            }
+            else {
+                std::string fileName;
+                getline(std::cin, fileName);
+                send_all(filePeerSocket, "y\n");
+                if(fileName.empty()) {
+                    if(receive_file(filePeerSocket, "download") == -1) {
+                        std::cout << "[CLIENT] File transission failed, please retry later\n";
+                    }
+                }
+                else {
+                    if(receive_file(filePeerSocket, fileName) == -1) {
+                        std::cout << "[CLIENT] File transission failed, please retry later\n";
+                    }
+                }
+                safe_close(filePeerSocket);
+                filePeerSocket = -1;
+                filePeerName = "";
+                clientState = CHATTING;
+            }
         }
     }
 
@@ -286,8 +419,9 @@ void chat_mode() {
 }
 
 void group_mode(int serverSocket, const std::string &groupName) {
-    std::cout << "---Entered Group Room (Type \"_exit\" to quit)---\n";
+    std::cout << "---Entered Group Room (Type \"_exit\" to quit, \"_send <username> <filename>\" to send file)---\n";
     clientState = GROUPING;
+    isBusy = false;
 
     print_chat_history(groups[groupName].groupHistory);
 
@@ -371,17 +505,89 @@ void group_mode(int serverSocket, const std::string &groupName) {
             }
         }
         if(FD_ISSET(STDIN_FILENO, &read_fds)) {
-            std::string input;
-            if(!getline(std::cin, input) || input == "_exit") {
-                std::cout << "\033[A\33[2K\r(" << myName << " has left the room)\n";
-                save_chat_history(groups[groupName].groupHistory, "(" + myName + " has left the room)");
-                send_all(serverSocket, "_exit\n");
-                break;
+            if(clientState != WAITFILE && clientState != WAITNAME) {
+                std::string input;
+                
+                if(!getline(std::cin, input) || input == "_exit") {
+                    std::cout << "\033[A\33[2K\r(" << myName << " has left the room)\n";
+                    save_chat_history(groups[groupName].groupHistory, "(" + myName + " has left the room)");
+                    send_all(serverSocket, "_exit\n");
+                    break;
+                }
+                
+                char token[4][4096];
+                int argc = parse(input, token);
+                std::string cmd = token[0];
+                if(argc == 3 && cmd == "_send") {
+                    if(isBusy) {
+                        std::cout << "\33[2K\r" << "[CLIENT] " << "You are currently sending file. Please retry later\n" << std::flush;
+                        continue;
+                    }
+                    std::string input = "send " + std::string(token[1]) + " " + std::string(token[2]);
+
+                    char token[4][4096];
+                    int argc = parse(input, token);
+                    std::string cmd = token[0];
+                    std::string fileName = token[2];
+
+                    send_all(mySocket, input + "\n");
+                    std::string res;
+                    if(receive_all(mySocket, res) < 0) {
+                        continue;
+                    }
+
+                    if(res.find("Connect failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
+                        std::cout << "\33[2K\r" << "[SERVER] " << res << "\n> " << std::flush;
+                        continue;
+                    }
+
+                    std::string data = res + " " + fileName;
+                    pthread_t tid;
+                    pthread_create(&tid, nullptr, para_sent, &data);
+                    pthread_detach(tid);
+                    continue;        
+                }
+
+                std::cout << "\033[A\33[2K\r";
+                std::string msg = groups[groupName].groupCrypto.encrypt(myName + ": " + input);
+                // std::cout << "send: " << msg << std::endl;
+                send_all(serverSocket, msg);
+                // save_chat_history(groups[groupName].groupHistory, myName + ": " + input);
             }
-            std::cout << "\033[A\33[2K\r";
-            std::string msg = groups[groupName].groupCrypto.encrypt(myName + ": " + input);
-            send_all(serverSocket, msg);
-            // save_chat_history(groups[groupName].groupHistory, myName + ": " + input);
+            else if(clientState == WAITFILE) {
+                std::string line;
+                getline(std::cin, line);
+                if(line == "y") {
+                    std::cout << "[REQUEST] Please enter the file name\n" << std::flush;
+                    clientState = WAITNAME;
+                }
+                else {
+                    send_all(filePeerSocket, "n\n");
+                    safe_close(filePeerSocket);
+                    filePeerSocket = -1;
+                    filePeerName = "";
+                    clientState = GROUPING;
+                }
+            }
+            else {
+                std::string fileName;
+                getline(std::cin, fileName);
+                send_all(filePeerSocket, "y\n");
+                if(fileName.empty()) {
+                    if(receive_file(filePeerSocket, "download") == -1) {
+                        std::cout << "[CLIENT] File transission failed, please retry later\n";
+                    }
+                }
+                else {
+                    if(receive_file(filePeerSocket, fileName) == -1) {
+                        std::cout << "[CLIENT] File transission failed, please retry later\n";
+                    }
+                }
+                safe_close(filePeerSocket);
+                filePeerSocket = -1;
+                filePeerName = "";
+                clientState = GROUPING;
+            }
         }
     }
     groupSocket = -1;
@@ -421,7 +627,7 @@ void* listener(void* arg) {
         
         if (argc >= 2) {
             std::string cmd = token[0];
-            if(cmd == "C" && clientState == IDLE) {
+            if(cmd == "C" && clientState == IDLE && !isBusy) {
                 peerSocket = csock;
                 peerName = token[1];
                 std::cout << "\n[REQUEST] " << peerName << " wants to chat with you, accept? (y/n)\n> " << std::flush;
@@ -429,23 +635,26 @@ void* listener(void* arg) {
                 clientState = PENDING;
             }
             else if(cmd == "G") {
+                // std::cout << "Receive command: " << res << std::endl;
                 std::string groupName = token[2];
+                // std::cout << "send group key of " << groupName << ": " << groups[groupName].groupCrypto.get_group_key() << std::endl;
                 send_all(csock, groups[groupName].groupCrypto.get_group_key());
                 safe_close(csock);
                 continue;
             }
-            else if(cmd == "S" && clientState != PENDING && clientState != WAITFILE) {
+            else if(cmd == "S") {
                 // std::cout << "S detected\n";
                 std::string groupName = token[1];
                 groups[groupName].groupCrypto.set_random_group_key();
+                // std::cout << "changed group key of " << groupName << " to " << groups[groupName].groupCrypto.get_group_key() << std::endl;
                 send_all(csock, "_ACK\n");
                 safe_close(csock);
                 continue;
             }
-            else if(cmd == "F") {
-                peerSocket = csock;
-                peerName = token[1];
-                std::cout << "\n[REQUEST] " << peerName << " wants to send a file to you, accept? (y/n)\n> " << std::flush;
+            else if(cmd == "F" && (clientState == IDLE || clientState == CHATTING || clientState == GROUPING) && !isBusy) {
+                filePeerSocket = csock;
+                filePeerName = token[1];
+                std::cout << "\n[REQUEST] " << filePeerName << " wants to send a file to you, accept? (y/n)\n> " << std::flush;
 
                 clientState = WAITFILE;
             }
@@ -471,7 +680,7 @@ int main(int argc, char** argv) {
     int serverPort = atoi(argv[2]);
     // int listenPort = atoi(argv[3]);
 
-    int mySocket = socket(AF_INET, SOCK_STREAM, 0);
+    mySocket = socket(AF_INET, SOCK_STREAM, 0);
     if(mySocket < 0) {
         perror("Error");
         return 1;
@@ -547,7 +756,7 @@ int main(int argc, char** argv) {
                         std::string res;
                         if(receive_all(mySocket, res) < 0) break;
 
-                        if(res.find("Chat failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
+                        if(res.find("Connect failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
                             std::cout << "[SERVER] " << res << std::endl;
                             continue;
                         }
@@ -560,6 +769,7 @@ int main(int argc, char** argv) {
                         peerName = token[1];
 
                         std::cout << "[CLIENT] Connecting to " << targetIP << ":" << targetPort << "...\n";
+                        isBusy = true;
 
                         peerSocket = socket(AF_INET, SOCK_STREAM, 0);
                         if(peerSocket < 0) {
@@ -567,6 +777,7 @@ int main(int argc, char** argv) {
                             std::cout << "[CLIENT] Connection failed, please retry later\n";
                             peerSocket = -1;
                             peerName = "";
+                            isBusy = false;
                             continue;
                         }
                         sockaddr_in peerAddr;
@@ -579,11 +790,13 @@ int main(int argc, char** argv) {
                             safe_close(peerSocket);
                             peerSocket = -1;
                             peerName = "";
+                            isBusy = false;
                             continue;
                         }
                         else {
                             if(send_request(peerSocket, myName, "C")) {
                                 chat_mode();
+                                isBusy = false;
                                 continue;
                             }
                             else {
@@ -591,9 +804,11 @@ int main(int argc, char** argv) {
                                 safe_close(peerSocket);
                                 peerSocket = -1;
                                 peerName = "";
+                                isBusy = false;
                                 continue;
                             }
                         }
+                        isBusy = false;
                     }
                 }
                 else if(cmd == "join") {
@@ -602,7 +817,7 @@ int main(int argc, char** argv) {
                         std::string res;
                         if(receive_all(mySocket, res) < 0) break;
 
-                        std::string groupName = token[2];
+                        std::string groupName = token[1];
                         if(!groups.count(groupName)) {
                             groups[groupName].groupCrypto.set_random_group_key();
                         }
@@ -624,12 +839,14 @@ int main(int argc, char** argv) {
                         }
                         else {
                             std::cout << "[CLIENT] Connecting to " << targetIP << ":" << targetPort << "...\n";
+                            isBusy = true;
 
                             groupSocket = socket(AF_INET, SOCK_STREAM, 0);
                             if(groupSocket < 0) {
                                 perror("Error");
                                 std::cout << "[CLIENT] Connection failed, please retry later\n";
                                 peerSocket = -1;
+                                isBusy = false;
                                 continue;
                             }
                             sockaddr_in groupAddr;
@@ -641,6 +858,7 @@ int main(int argc, char** argv) {
                                 std::cout << "[CLIENT] Connection failed, please retry later\n";
                                 safe_close(groupSocket);
                                 groupSocket = -1;
+                                isBusy = false;
                                 continue;
                             }
                             else {
@@ -648,16 +866,19 @@ int main(int argc, char** argv) {
                                     safe_close(groupSocket);
                                     groupSocket = -1;
                                     group_mode(mySocket, groupName);
+                                    isBusy = false;
                                     continue;
                                 }
                                 else {
                                     std::cout << "[CLIENT] Connection refused\n";
                                     safe_close(groupSocket);
                                     groupSocket = -1;
+                                    isBusy = false;
                                     continue;
                                 }
                             }
                         }
+                        isBusy = false;
                     }
                 }
                 else if(cmd == "send") {
@@ -666,7 +887,7 @@ int main(int argc, char** argv) {
                         std::string res;
                         if(receive_all(mySocket, res) < 0) break;
 
-                        if(res.find("Send failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
+                        if(res.find("Connect failed") != std::string::npos || res.find("Invalid command") != std::string::npos) {
                             std::cout << "[SERVER] " << res << std::endl;
                             continue;
                         }
@@ -676,56 +897,64 @@ int main(int argc, char** argv) {
 
                         std::string targetIP = resToken[0];
                         int targetPort = atoi(resToken[1]);
-                        peerName = token[1];
+                        filePeerName = token[1];
                         std::string fileName = token[2];
 
                         std::cout << "[CLIENT] Connecting to " << targetIP << ":" << targetPort << "...\n";
+                        isBusy = true;
 
-                        peerSocket = socket(AF_INET, SOCK_STREAM, 0);
-                        if(peerSocket < 0) {
+                        filePeerSocket = socket(AF_INET, SOCK_STREAM, 0);
+                        if(filePeerSocket < 0) {
                             perror("Error");
                             std::cout << "[CLIENT] Connection failed, please retry later\n";
-                            peerSocket = -1;
-                            peerName = "";
+                            filePeerSocket = -1;
+                            filePeerName = "";
+                            isBusy = false;
                             continue;
                         }
-                        sockaddr_in peerAddr;
-                        peerAddr.sin_family = AF_INET;
-                        peerAddr.sin_port = htons(targetPort);
-                        inet_pton(AF_INET, targetIP.c_str(), &peerAddr.sin_addr);
-                        if(connect(peerSocket, (struct sockaddr*)&peerAddr, sizeof(peerAddr)) < 0) {
+                        sockaddr_in filePeerAddr;
+                        filePeerAddr.sin_family = AF_INET;
+                        filePeerAddr.sin_port = htons(targetPort);
+                        inet_pton(AF_INET, targetIP.c_str(), &filePeerAddr.sin_addr);
+                        if(connect(filePeerSocket, (struct sockaddr*)&filePeerAddr, sizeof(filePeerAddr)) < 0) {
                             perror("Error");
                             std::cout << "[CLIENT] Connection failed, please retry later\n";
-                            safe_close(peerSocket);
-                            peerSocket = -1;
-                            peerName = "";
+                            safe_close(filePeerSocket);
+                            filePeerSocket = -1;
+                            filePeerName = "";
+                            isBusy = false;
                             continue;
                         }
                         else {
-                            if(send_request(peerSocket, myName, "F")) {
-                                if(send_file(peerSocket, fileName) < 0) {
+                            if(send_request(filePeerSocket, myName, "F")) {
+                                if(send_file(filePeerSocket, fileName) < 0) {
                                     std::cout << "[CLIENT] File transission failed, please retry later\n";
                                 }
-                                safe_close(peerSocket);
-                                peerSocket = -1;
-                                peerName = "";
+                                safe_close(filePeerSocket);
+                                filePeerSocket = -1;
+                                filePeerName = "";
+                                isBusy = false;
                                 continue;
                             }
                             else {
                                 std::cout << "[CLIENT] Connection refused\n";
-                                safe_close(peerSocket);
-                                peerSocket = -1;
-                                peerName = "";
+                                safe_close(filePeerSocket);
+                                filePeerSocket = -1;
+                                filePeerName = "";
+                                isBusy = false;
                                 continue;
                             }
                         }
                     }
+                    isBusy = false;
                 }
-                send_all(mySocket, line + "\n");
-                std::string res;
-                if(receive_all(mySocket, res) < 0) break;
+                else {
+                    send_all(mySocket, line + "\n");
+                    std::string res;
+                    if(receive_all(mySocket, res) < 0) break;
 
-                std::cout << "[SERVER] " << res << std::endl;
+                    std::cout << "[SERVER] " << res << std::endl;
+                }
             }
             else if(clientState == PENDING) {
                 if(line == "y") {
@@ -742,28 +971,33 @@ int main(int argc, char** argv) {
             }
             else if(clientState == WAITFILE) {
                 if(line == "y") {
-                    std::cout << "[REQUEST] Please enter the file name\n> " << std::flush;
-                    std::string fileName;
-                    std::cin >> fileName;
-                    send_all(peerSocket, "y\n");
-                    if(fileName.empty()) {
-                        receive_file(peerSocket, "download");
-                    }
-                    else {
-                        receive_file(peerSocket, fileName);
-                    }
-                    safe_close(peerSocket);
-                    peerSocket = -1;
-                    peerName = "";
+                    std::cout << "[REQUEST] Please enter the file name\n" << std::flush;
+                    clientState = WAITNAME;
+                }
+                else {
+                    send_all(filePeerSocket, "n\n");
+                    safe_close(filePeerSocket);
+                    filePeerSocket = -1;
+                    filePeerName = "";
                     clientState = IDLE;
                 }
-                else if(line == "n") {
-                    send_all(peerSocket, "n\n");
-                    safe_close(peerSocket);
-                    peerSocket = -1;
-                    peerName = "";
-                    clientState = IDLE;
+            }
+            else if(clientState == WAITNAME) {
+                send_all(filePeerSocket, "y\n");
+                if(line.empty()) {
+                    if(receive_file(filePeerSocket, "download") == -1) {
+                        std::cout << "[CLIENT] File transission failed, please retry later\n";
+                    }
                 }
+                else {
+                    if(receive_file(filePeerSocket, line) == -1) {
+                        std::cout << "[CLIENT] File transission failed, please retry later\n";
+                    }
+                }
+                safe_close(filePeerSocket);
+                filePeerSocket = -1;
+                filePeerName = "";
+                clientState = IDLE;
             }
         }
     }

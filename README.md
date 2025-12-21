@@ -1,5 +1,7 @@
 # CN 2025 Project Phase 2
 
+B12901066吳孟峰、B12902106何易儒
+
 ## Compilation instructions
 
 To compile `server.cpp` and `client.cpp`, run
